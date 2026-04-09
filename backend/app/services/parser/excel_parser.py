@@ -1,9 +1,8 @@
 """
 Excel Parser — Extracts transactions from bank statement Excel files (.xlsx, .xls).
-Auto-detects column headers and maps to standard transaction format.
+Uses openpyxl directly (no pandas dependency for low memory).
 """
 
-import pandas as pd
 import re
 from typing import Dict, Any, List, Optional
 from datetime import datetime
@@ -11,7 +10,6 @@ from datetime import datetime
 from app.services.parser.bank_detector import detect_bank_from_text
 
 
-# Common column name mappings
 COLUMN_MAPPINGS = {
     "date": ["date", "txn date", "transaction date", "trans date", "posting date", "value date",
              "txn dt", "trans dt", "dated"],
@@ -29,23 +27,11 @@ COLUMN_MAPPINGS = {
 }
 
 
-def _find_header_row(df: pd.DataFrame) -> int:
-    """Find the row containing column headers."""
-    for idx in range(min(20, len(df))):
-        row = df.iloc[idx]
-        row_text = ' '.join(str(val).lower() for val in row if pd.notna(val))
-        # Check for key header words
-        if any(kw in row_text for kw in ["date", "narration", "description", "particulars"]):
-            if any(kw in row_text for kw in ["debit", "credit", "withdrawal", "deposit", "balance", "amount"]):
-                return idx
-    return 0
-
-
 def _map_columns(headers: List[str]) -> Dict[str, int]:
     """Map actual column names to standard field names."""
     col_map = {}
     for idx, header in enumerate(headers):
-        if not header or pd.isna(header):
+        if not header:
             continue
         header_lower = str(header).strip().lower()
         for field, keywords in COLUMN_MAPPINGS.items():
@@ -58,11 +44,13 @@ def _map_columns(headers: List[str]) -> Dict[str, int]:
 
 def _normalize_date(date_val) -> str:
     """Normalize date values from Excel."""
-    if pd.isna(date_val):
+    if date_val is None:
         return ""
     if isinstance(date_val, datetime):
         return date_val.strftime("%d-%m-%y")
     date_str = str(date_val).strip()
+    if not date_str:
+        return ""
     formats = [
         "%d-%m-%Y", "%d/%m/%Y", "%d-%m-%y", "%d/%m/%y",
         "%Y-%m-%d", "%d %b %Y", "%d %b %y", "%d-%b-%Y", "%d-%b-%y",
@@ -78,9 +66,11 @@ def _normalize_date(date_val) -> str:
 
 def _parse_amount(val) -> float:
     """Parse amount value."""
-    if pd.isna(val) or val is None or str(val).strip() == '':
+    if val is None:
         return 0.0
-    cleaned = re.sub(r'[₹,\s]', '', str(val).strip())
+    if isinstance(val, (int, float)):
+        return abs(val)
+    cleaned = re.sub(r'[₹,\s"\'()]', '', str(val).strip())
     cleaned = re.sub(r'(Dr\.?|Cr\.?|DR|CR)$', '', cleaned, flags=re.IGNORECASE).strip()
     try:
         return abs(float(cleaned))
@@ -89,33 +79,38 @@ def _parse_amount(val) -> float:
 
 
 def parse_excel(file_path: str) -> Dict[str, Any]:
-    """
-    Parse Excel bank statement file.
-    Returns structured data with account_info and transactions.
-    """
-    # Read Excel file
-    try:
-        df = pd.read_excel(file_path, header=None, engine='openpyxl')
-    except Exception:
-        try:
-            df = pd.read_excel(file_path, header=None, engine='xlrd')
-        except Exception as e:
-            raise ValueError(f"Could not read Excel file: {str(e)}")
+    """Parse Excel bank statement file using openpyxl."""
+    from openpyxl import load_workbook
 
-    if df.empty:
+    wb = load_workbook(file_path, read_only=True, data_only=True)
+    ws = wb.active
+
+    # Read all rows
+    all_rows = []
+    for row in ws.iter_rows(values_only=True):
+        all_rows.append(list(row))
+    wb.close()
+
+    if not all_rows:
         raise ValueError("Excel file is empty.")
 
-    # Extract text from first few rows for bank detection
-    header_text = ' '.join(str(val) for row in df.head(10).values for val in row if pd.notna(val))
+    # Find header row
+    header_idx = 0
+    for idx in range(min(20, len(all_rows))):
+        row_text = ' '.join(str(v).lower() for v in all_rows[idx] if v is not None)
+        if any(kw in row_text for kw in ["date", "narration", "description", "particulars"]):
+            if any(kw in row_text for kw in ["debit", "credit", "withdrawal", "deposit", "balance", "amount"]):
+                header_idx = idx
+                break
+
+    headers = [str(v).strip() if v else "" for v in all_rows[header_idx]]
+    data_rows = all_rows[header_idx + 1:]
 
     # Detect bank
-    bank_key, bank_name = detect_bank_from_text(header_text)
+    all_text = ' '.join([' '.join(str(v) for v in row if v) for row in all_rows[:30]])
+    bank_key, _ = detect_bank_from_text(all_text[:2000])
 
-    # Find header row
-    header_row = _find_header_row(df)
-
-    # Get headers and map columns
-    headers = [str(val).strip() if pd.notna(val) else "" for val in df.iloc[header_row]]
+    # Map columns
     col_map = _map_columns(headers)
 
     if "date" not in col_map:
@@ -123,37 +118,36 @@ def parse_excel(file_path: str) -> Dict[str, Any]:
 
     # Extract transactions
     transactions = []
-    for idx in range(header_row + 1, len(df)):
-        row = df.iloc[idx]
-
-        # Get date
-        date_val = row.iloc[col_map["date"]] if "date" in col_map else None
-        date_str = _normalize_date(date_val)
+    for row in data_rows:
+        date_idx = col_map["date"]
+        if date_idx >= len(row) or row[date_idx] is None:
+            continue
+        date_str = _normalize_date(row[date_idx])
         if not date_str:
             continue
+
+        def get_val(field):
+            idx = col_map.get(field)
+            if idx is not None and idx < len(row):
+                return row[idx]
+            return None
+
+        debit = _parse_amount(get_val("debit"))
+        credit = _parse_amount(get_val("credit"))
 
         txn = {
             "sr_no": len(transactions) + 1,
             "txn_date": date_str,
-            "value_date": _normalize_date(row.iloc[col_map["value_date"]]) if "value_date" in col_map else "",
-            "reference_no": str(row.iloc[col_map["reference"]]).strip() if "reference" in col_map and pd.notna(row.iloc[col_map["reference"]]) else "",
-            "description": str(row.iloc[col_map["description"]]).strip() if "description" in col_map and pd.notna(row.iloc[col_map["description"]]) else "",
-            "debit": _parse_amount(row.iloc[col_map["debit"]]) if "debit" in col_map else 0.0,
-            "credit": _parse_amount(row.iloc[col_map["credit"]]) if "credit" in col_map else 0.0,
-            "balance": _parse_amount(row.iloc[col_map["balance"]]) if "balance" in col_map else 0.0,
+            "value_date": _normalize_date(get_val("value_date")) if "value_date" in col_map else "",
+            "reference_no": str(get_val("reference") or "").strip(),
+            "description": str(get_val("description") or "").strip(),
+            "debit": debit,
+            "credit": credit,
+            "balance": _parse_amount(get_val("balance")),
+            "txn_type": "Dr." if debit > 0 else ("Cr." if credit > 0 else ""),
         }
-
-        # Determine txn type
-        if txn["debit"] > 0:
-            txn["txn_type"] = "Dr."
-        elif txn["credit"] > 0:
-            txn["txn_type"] = "Cr."
-        else:
-            txn["txn_type"] = ""
-
         transactions.append(txn)
 
-    # Build account info
     account_info = {
         "bank_name": bank_key,
         "account_holder_name": "",
@@ -172,22 +166,6 @@ def parse_excel(file_path: str) -> Dict[str, Any]:
             "to": transactions[-1]["txn_date"] if transactions else "",
         },
     }
-
-    # Try to extract more info from header rows
-    for idx in range(min(header_row, 15)):
-        row_text = ' '.join(str(val) for val in df.iloc[idx] if pd.notna(val))
-        # Account number
-        acc_match = re.search(r'(?:account\s*(?:no|number|#)[\s.:]*)\s*(\d{6,20})', row_text, re.IGNORECASE)
-        if acc_match:
-            account_info["account_number"] = acc_match.group(1)
-        # Name
-        name_match = re.search(r'(?:name|holder|customer)[\s.:]+([A-Za-z\s.]+)', row_text, re.IGNORECASE)
-        if name_match:
-            account_info["account_holder_name"] = name_match.group(1).strip()
-        # IFSC
-        ifsc_match = re.search(r'\b([A-Z]{4}0[A-Z0-9]{6})\b', row_text.upper())
-        if ifsc_match:
-            account_info["ifsc"] = ifsc_match.group(1)
 
     return {
         "account_info": account_info,
