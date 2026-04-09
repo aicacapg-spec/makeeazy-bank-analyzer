@@ -59,10 +59,23 @@ def health_check():
 
 
 # ─── Serve Frontend Static Files ───
-# In production, the built React app is served from frontend/dist
-FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "frontend", "dist")
+# Try multiple paths: local dev vs Render deployment
+_candidates = [
+    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "frontend", "dist"),
+    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), "frontend", "dist"),
+    "/opt/render/project/src/frontend/dist",
+]
+FRONTEND_DIR = None
+for _p in _candidates:
+    if os.path.exists(_p):
+        FRONTEND_DIR = _p
+        print(f"[STATIC] Serving frontend from: {_p}")
+        break
 
-if os.path.exists(FRONTEND_DIR):
+if not FRONTEND_DIR:
+    print(f"[STATIC] No frontend dist found. Candidates: {_candidates}")
+
+if FRONTEND_DIR and os.path.exists(os.path.join(FRONTEND_DIR, "assets")):
     app.mount("/assets", StaticFiles(directory=os.path.join(FRONTEND_DIR, "assets")), name="assets")
 
     @app.get("/{full_path:path}")
