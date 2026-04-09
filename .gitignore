@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Secrets
+.env
+backend/settings.json
+
+# Node
+node_modules/
+
+# Database & uploads
+*.db
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# Test / temp files
+test_*.py
+test_*.xlsx
+test_*.pdf
+analysis_*.json
+analysis_*.xlsx
+
+# Root-level test PDFs
+/*.pdf
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
