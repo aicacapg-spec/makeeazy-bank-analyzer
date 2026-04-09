@@ -96,11 +96,18 @@ async def upload_statement(
             # Step 1: Parse (regex)
             parsed_data = parse_file(file_path, password=password)
 
-            # Step 1.5: AI Enhancement (Groq) — verify account info + categorize transactions
-            try:
-                parsed_data = run_ai_enhancement(parsed_data)
-            except Exception as ai_err:
-                print(f"[UPLOAD] AI enhancement failed (non-fatal): {str(ai_err)[:100]}")
+            # Step 1.5: AI Enhancement — only for files under 1000 txns (memory limit)
+            txn_count = len(parsed_data.get("transactions", []))
+            if txn_count < 1000:
+                try:
+                    parsed_data = run_ai_enhancement(parsed_data)
+                except Exception as ai_err:
+                    print(f"[UPLOAD] AI enhancement failed (non-fatal): {str(ai_err)[:100]}")
+            else:
+                print(f"[UPLOAD] Skipping AI for {txn_count} txns (memory optimization)")
+
+            # Free raw text memory
+            parsed_data.pop('_raw_text', None)
 
             # Step 2: Apply manual overrides (take priority over AI)
             account_info = parsed_data.get("account_info", {})
@@ -142,17 +149,26 @@ async def upload_statement(
                 config_overrides["emi_keywords"] = options["emi_keywords"]
             analysis = run_full_analysis(parsed_data, client_id=client_id, config_overrides=config_overrides)
 
-            # Step 4.5: Generate AI Insights
-            try:
-                ai_insights = generate_ai_insights(
-                    parsed_data.get("transactions", []),
-                    account_info,
-                    analysis.get("health_score", {})
-                )
-                analysis["ai_insights"] = ai_insights
-            except Exception as ai_err:
-                print(f"[UPLOAD] AI insights failed (non-fatal): {str(ai_err)[:100]}")
+            # Step 4.5: Generate AI Insights (skip for large files)
+            if txn_count < 1000:
+                try:
+                    ai_insights = generate_ai_insights(
+                        parsed_data.get("transactions", []),
+                        account_info,
+                        analysis.get("health_score", {})
+                    )
+                    analysis["ai_insights"] = ai_insights
+                except Exception as ai_err:
+                    print(f"[UPLOAD] AI insights failed (non-fatal): {str(ai_err)[:100]}")
+                    analysis["ai_insights"] = {}
+            else:
                 analysis["ai_insights"] = {}
+
+            # Cleanup uploaded file to save disk
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
 
             doc.analysis_json = json.dumps(analysis, default=str)
 
