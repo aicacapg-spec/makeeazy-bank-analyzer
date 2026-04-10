@@ -94,10 +94,26 @@ async def upload_statement(
         # ─── Process file ───
         try:
             # Step 1: Parse (regex)
-            parsed_data = parse_file(file_path, password=password)
-
-            # Step 1.5: AI Enhancement — works for ALL file sizes (smart sampling inside)
             import gc
+            parsed_data = parse_file(file_path, password=password)
+            gc.collect()
+
+            # Memory guard: limit to 2000 txns for 512MB environments
+            txns = parsed_data.get("transactions", [])
+            if len(txns) > 2000:
+                print(f"[UPLOAD] {len(txns)} txns — sampling to 2000 for memory safety")
+                # Keep every Nth transaction to maintain date coverage
+                step = len(txns) // 2000
+                sampled = txns[::step][:2000]
+                # Re-number
+                for i, t in enumerate(sampled):
+                    t["sr_no"] = i + 1
+                parsed_data["transactions"] = sampled
+                parsed_data["_full_count"] = len(txns)
+                del txns, sampled
+                gc.collect()
+
+            # Step 1.5: AI Enhancement — works for ALL file sizes
             try:
                 parsed_data = run_ai_enhancement(parsed_data)
             except Exception as ai_err:
