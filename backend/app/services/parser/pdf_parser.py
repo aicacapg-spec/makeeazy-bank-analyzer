@@ -757,18 +757,20 @@ def _validate_and_finalize(account_info: Dict, transactions: List[Dict]) -> Dict
 
 def parse_pdf(file_path: str, password: Optional[str] = None) -> Dict[str, Any]:
     """
-    Main PDF parsing function.
+    Main PDF parsing function. Memory-optimized for Render free tier (512MB).
     
     Strategy order (reliability-first):
       1. Smart Text Parser (instant, no API, handles multi-line descriptions)
       2. Table Extraction (pdfplumber tables)
       3. LLM Enhancement (Gemini/Groq — when API quota available)
     """
+    import gc
     print("[PARSER] Starting PDF parse...")
 
     # Step 1: Extract text per-page
     pages_text = _extract_pages_text(file_path, password)
     full_text = "\n".join(pages_text)
+    header_text = full_text[:4000]  # Save header for AI before freeing
 
     if not full_text.strip():
         raise ValueError("Could not extract text from PDF. The file may be scanned/image-based (OCR not yet supported).")
@@ -785,6 +787,10 @@ def parse_pdf(file_path: str, password: Optional[str] = None) -> Dict[str, Any]:
     text_transactions = _extract_transactions_from_text(full_text)
     text_transactions = _post_process_transactions(text_transactions)
 
+    # Free full text now (biggest memory consumer)
+    del full_text, pages_text
+    gc.collect()
+
     # ════════════════════════════════════════════
     #  STRATEGY 2: TABLE EXTRACTION (Secondary)
     # ════════════════════════════════════════════
@@ -794,9 +800,12 @@ def parse_pdf(file_path: str, password: Optional[str] = None) -> Dict[str, Any]:
         table_transactions = _extract_transactions_from_tables(file_path, password)
         table_transactions = _post_process_transactions(table_transactions)
         table_transactions = _infer_debit_credit_from_balance(table_transactions)
+        gc.collect()
 
     # Pick best result
     transactions = text_transactions if len(text_transactions) >= len(table_transactions) else table_transactions
+    del text_transactions, table_transactions
+    gc.collect()
     print(f"[PARSER] Regex extracted {len(transactions)} transactions")
 
     # ════════════════════════════════════════════
@@ -809,8 +818,8 @@ def parse_pdf(file_path: str, password: Optional[str] = None) -> Dict[str, Any]:
 
             print("[PARSER] Few transactions found, trying LLM extraction...")
 
-            llm_account_info = extract_account_info_llm(pages_text)
-            llm_transactions = extract_transactions_llm(pages_text)
+            llm_account_info = extract_account_info_llm([header_text])
+            llm_transactions = extract_transactions_llm([header_text])
 
             if llm_transactions and len(llm_transactions) > len(transactions):
                 print(f"[PARSER] LLM found {len(llm_transactions)} transactions (better than regex: {len(transactions)})")
@@ -829,6 +838,8 @@ def parse_pdf(file_path: str, password: Optional[str] = None) -> Dict[str, Any]:
 
     print(f"[PARSER] Final: {len(transactions)} transactions")
     result = _validate_and_finalize(account_info, transactions)
-    result["_raw_text"] = full_text[:6000]  # Store header for AI enhancement
+    result["_raw_text"] = header_text  # For AI enhancement
+    gc.collect()
     return result
+
 
