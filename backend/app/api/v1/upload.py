@@ -98,14 +98,13 @@ async def upload_statement(
             parsed_data = parse_file(file_path, password=password)
             gc.collect()
 
-            # Memory guard: limit to 2000 txns for 512MB environments
+            # Memory guard: limit to 1500 txns for 512MB/free CPU
             txns = parsed_data.get("transactions", [])
-            if len(txns) > 2000:
-                print(f"[UPLOAD] {len(txns)} txns — sampling to 2000 for memory safety")
-                # Keep every Nth transaction to maintain date coverage
-                step = len(txns) // 2000
-                sampled = txns[::step][:2000]
-                # Re-number
+            original_count = len(txns)
+            if len(txns) > 1500:
+                print(f"[UPLOAD] {len(txns)} txns — sampling to 1500 for memory safety")
+                step = max(1, len(txns) // 1500)
+                sampled = txns[::step][:1500]
                 for i, t in enumerate(sampled):
                     t["sr_no"] = i + 1
                 parsed_data["transactions"] = sampled
@@ -113,11 +112,15 @@ async def upload_statement(
                 del txns, sampled
                 gc.collect()
 
-            # Step 1.5: AI Enhancement — works for ALL file sizes
-            try:
-                parsed_data = run_ai_enhancement(parsed_data)
-            except Exception as ai_err:
-                print(f"[UPLOAD] AI enhancement failed (non-fatal): {str(ai_err)[:100]}")
+            # Step 1.5: AI Enhancement
+            if original_count <= 3000:
+                try:
+                    parsed_data = run_ai_enhancement(parsed_data)
+                except Exception as ai_err:
+                    print(f"[UPLOAD] AI enhancement failed (non-fatal): {str(ai_err)[:100]}")
+                    parsed_data.pop('_raw_text', None)
+            else:
+                print(f"[UPLOAD] Skipping AI for {original_count} txns (speed optimization)")
                 parsed_data.pop('_raw_text', None)
             gc.collect()
 
