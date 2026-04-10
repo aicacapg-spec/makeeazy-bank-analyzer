@@ -672,22 +672,29 @@ def _infer_debit_credit_from_balance(transactions: List[Dict]) -> List[Dict]:
 # ═══════════════════════════════════════════════════════
 
 def _extract_pages_text(file_path: str, password: Optional[str] = None) -> List[str]:
-    """Extract text from each page separately."""
+    """Extract text from each page separately. Memory-optimized: flushes each page."""
+    import gc
     open_kwargs = {}
     if password:
         open_kwargs['password'] = password
     pages_text = []
     try:
         with pdfplumber.open(file_path, **open_kwargs) as pdf:
-            for page in pdf.pages:
+            total = len(pdf.pages)
+            for i, page in enumerate(pdf.pages):
                 text = page.extract_text() or ""
                 if text.strip():
                     pages_text.append(text)
+                # Flush page object to free memory (critical for large PDFs)
+                page.flush_cache()
+                if i % 20 == 0 and i > 0:
+                    gc.collect()
     except Exception as e:
         msg = str(e).lower()
         if "password" in msg or "encrypted" in msg or "decrypt" in msg:
             raise ValueError("PDF is password-protected. Please provide the correct password.")
         raise ValueError(f"Could not read PDF: {str(e)}")
+    gc.collect()
     return pages_text
 
 
